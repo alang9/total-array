@@ -44,6 +44,6 @@ library
   exposed-modules:     Data.Small, Data.TotalArray.Generic, Data.TotalArray.Reflection, Data.Fin
   other-modules:       Data.MySafeInt, Data.Small.Internal
   -- other-extensions:    
-  build-depends:       base >=4.8 && <4.10, vector, primitive, reflection, tagged
+  build-depends:       base >=4.8 && <4.10, vector, primitive, reflection, tagged, constraints
   -- hs-source-dirs:      
   default-language:    Haskell2010
