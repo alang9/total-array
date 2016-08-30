@@ -11,6 +11,7 @@
 {-# LANGUAGE TypeInType #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Data.TotalArray.Reflection where
 
@@ -27,46 +28,21 @@ import qualified Data.Vector as VB
 import qualified Data.Vector.Generic as G
 import qualified Data.Vector.Generic.Mutable as GM
 import GHC.Exts (Any)
+import GHC.TypeLits
 import Unsafe.Coerce
 
+import Data.Fin
 import Data.MySafeInt
 import Data.Small.Internal
 import Data.TotalArray.Generic (GArray (..))
 import qualified Data.TotalArray.Generic as Gen
 
-type Map vec tag a = GArray vec (VecIdx tag) a
-
 newtype VecIdx (s :: k) = UnsafeVecIdx {unVecIdx :: Int} deriving (Show)
-
-instance (G.Vector vec a, Reifies tag (vec a)) => Bounded (VecIdx tag) where
-    minBound = UnsafeVecIdx 0
-    maxBound = UnsafeVecIdx $ G.length (reflect (Proxy :: Proxy tag)) - 1
-
-instance (G.Vector vec a, Reifies tag (vec a)) => Enum (VecIdx tag) where
-    toEnum n
-        | n < 0 = error "Enum (VecIdx tag)"
-        | n > G.length (reflect (Proxy :: Proxy tag)) - 1 = error "Enum (VecIdx tag)"
-        | otherwise = UnsafeVecIdx n
-    fromEnum = unVecIdx
 
 instance (G.Vector vec a, Reifies tag (vec a)) => Small (VecIdx tag) where
     numValues_ _ = toSafe $ G.length (reflect (Proxy :: Proxy tag))
     toIndex_ = \(UnsafeVecIdx x) -> x
     unsafeFromIndex_ = UnsafeVecIdx
-
-tabulate
-  :: forall tag vec k a. (Reifies tag (vec k), G.Vector vec k, G.Vector vec a)
-  => (k -> a)
-  -> Map vec tag a
-tabulate f = Array $ G.map f $ reflect (Proxy :: Proxy tag)
-
-tabulateM
-  :: forall tag vec k a m. (Reifies tag (vec k), G.Vector vec k, G.Vector vec a, Monad m)
-  => (k -> m a)
-  -> m (Map vec tag a)
-tabulateM f =
-  fmap Array $ G.mapM f $ reflect (Proxy :: Proxy tag)
-
 
 withIndices :: forall vec a r. (G.Vector vec a) => vec a ->
                (forall k (tag :: k). (Reifies tag (vec a), G.Vector vec a) =>
@@ -75,30 +51,27 @@ withIndices v f = reify v $
     \p@(Proxy :: Proxy tag) -> f (Proxy :: Proxy tag) (take (G.length (reflect p)) [UnsafeVecIdx n |  n <- [0..]])
 --    \(Proxy :: Proxy tag) -> f (take (G.length (reflect (Proxy :: Proxy tag))) [UnsafeVecIdx n |  n <- [0..]])
 
-lookup :: forall vec dat tag. (G.Vector vec dat, Reifies tag (vec dat)) => VecIdx tag -> dat
-lookup (UnsafeVecIdx n) = reflect (Proxy :: Proxy tag) G.! n
-
-lookupMap :: forall vec dat tag a. (G.Vector vec dat, Reifies tag (vec dat), G.Vector vec a) => VecIdx tag -> Map vec tag a -> a
-lookupMap (UnsafeVecIdx n) (Array arr) = arr G.! n
+lookup :: forall vec k a. (Small k, G.Vector vec a) => k -> GArray vec k a -> a
+lookup n (Array arr) = arr G.! toIndex n
 
 mapWithKey :: forall tag vec k a b. (Reifies tag (vec k), G.Vector vec k, G.Vector vec a, G.Vector vec b) =>
-              (k -> a -> b) -> Map vec tag a -> GArray vec k b
+              (k -> a -> b) -> GArray vec tag a -> GArray vec k b
 mapWithKey f (Array v) = Array $ G.zipWith f (reflect (Proxy :: Proxy tag)) v
 
-sum :: (Reifies tag (vec k), G.Vector vec a, Num a) => Map vec tag a -> a
+sum :: (Reifies tag (vec k), G.Vector vec a, Num a) => GArray vec tag a -> a
 sum (Array v) = G.sum v
 
 mapWithKeyM :: forall tag vec k a b m. (Reifies tag (vec k), G.Vector vec k, G.Vector vec a, G.Vector vec b, Monad m) =>
-               (k -> a -> m b) -> Map vec tag a -> m (Map vec tag b)
+               (k -> a -> m b) -> GArray vec tag a -> m (GArray vec tag b)
 mapWithKeyM f (Array v) = Array <$> G.zipWithM f (reflect (Proxy :: Proxy tag)) v
 
 intersectionWith :: (Reifies tag (vec k), G.Vector vec a, G.Vector vec b, G.Vector vec c) =>
-                    (a -> b -> c) -> Map vec tag a -> Map vec tag b -> Map vec tag c
+                    (a -> b -> c) -> GArray vec tag a -> GArray vec tag b -> GArray vec tag c
 intersectionWith f (Array v1) (Array v2) = Array $ G.zipWith f v1 v2
 
 intersectionWithKey :: forall tag vec k a b c.
                        (Reifies tag (vec k), G.Vector vec k, G.Vector vec a, G.Vector vec b, G.Vector vec c) =>
-                       (k -> a -> b -> c) -> Map vec tag a -> Map vec tag b -> Map vec tag c
+                       (k -> a -> b -> c) -> GArray vec tag a -> GArray vec tag b -> GArray vec tag c
 intersectionWithKey f (Array v1) (Array v2) = Array $ G.zipWith3 f (reflect (Proxy :: Proxy tag)) v1 v2
 
 reifyWithInjections :: forall tag vec bar foo r. (G.Vector vec bar, G.Vector vec foo, Reifies tag (vec foo)) =>
@@ -118,8 +91,7 @@ instance Category IdxFn where
   id = IdxFn 1 0
   IdxFn a b . IdxFn c d = IdxFn (a * c) (a * d + b)
 
-type R tag vec a = (Reifies tag (vec a), G.Vector vec a)
-
+type R n vec a = (Small n, G.Vector vec a)
 
 class ReifiesIndex k (i :: k) where
     treflectIndex :: Tagged i k
@@ -132,23 +104,41 @@ reifyIndex i f = unsafeCoerce (MagicIndex f :: MagicIndex k r) i Proxy
 reflectIndex :: forall k i. (ReifiesIndex k i) => Proxy i -> k
 reflectIndex _ = untag (treflectIndex :: Tagged i k)
 
-class Reifies1 k (f :: VecIdx k -> *) a | k f -> a where
-    reflect1 :: Proxy f -> a
+class Reifies1 k (f :: k -> Nat)  where
+--    reflect1 :: Proxy f -> a
+    reflect1 :: forall l. Proxy f -> Proxy l -> ReifiesIndex k l :- ReifiesSize (f l)
 
-newtype Magic1 k a r = Magic1 (forall (f :: VecIdx k -> *). (Reifies1 k f a) => Proxy f -> r)
+newtype Magic1 k r = Magic1 (forall (f :: k -> Nat). (Reifies1 k f) => Proxy f -> r)
 
-reify1 :: forall k a r. a -> (forall (f :: VecIdx k -> *). (Reifies1 k f a) => Proxy f -> r) -> r
-reify1 i f = unsafeCoerce (Magic1 f :: Magic1 k a r) i Proxy
+reify1 :: forall vec k r. (Small k, G.Vector vec Int) => GArray vec k Int -> (forall (f :: k -> Nat). (Reifies1 k f) => Proxy f -> r) -> r
+reify1 i f = unsafeCoerce (Magic1 f :: Magic1 k r) foo Proxy
+  where
+    foo :: Proxy f -> Proxy l -> ReifiesIndex k l :- ReifiesSize (f l)
+    foo _ p = Sub $ reifySize (lookup (reflectIndex p) i) $ \(Proxy :: Proxy pn) -> unsafeCoerce (Dict :: Dict (ReifiesSize pn))
 
-reifyDependent :: forall k vec b r a. (R k vec a, G.Vector vec b) => Map vec k b ->
-                  (forall (f :: VecIdx k -> *). Reifies1 k f (Map vec k b) => Proxy f -> (forall (l :: VecIdx k). ReifiesIndex (VecIdx k) l => Proxy l -> Dict (Reifies (f l) b)) -> r) ->
+data DArray k (f :: k -> Nat) vec a = DArray (GArray VB.Vector k (vec a))
+
+lookupD :: (ReifiesIndex k i, Small k) => Proxy i -> DArray k f vec a -> GArray vec (Fin (f i)) a
+lookupD pi (DArray ga) = Array $ lookup (reflectIndex pi) ga
+
+reifyDependent :: forall k vec b r. (R k vec b, G.Vector vec (vec b), G.Vector vec Int) => GArray vec k (vec b) ->
+                  (forall (f :: k -> Nat). Reifies1 k f =>
+                      Proxy f ->
+                      DArray k f vec b ->
+                      r) ->
                   r
-reifyDependent a f = reify1 a $ \p -> f p (\pl -> reify (lookupMap (reflectIndex pl) a) (\(Proxy :: Proxy pp) -> unsafeCoerce (Dict :: Dict (Reifies pp b))))
+reifyDependent a f = reify1 (Gen.map G.length a) $ \p -> f p (DArray $ Gen.convert a)
+
+reifyFinGArray :: forall vec a r. (G.Vector vec a) => vec a -> (forall n. (ReifiesSize n) => GArray vec (Fin n) a -> r) -> r
+reifyFinGArray v f = reifySize (G.length v) $ \(Proxy :: Proxy n) -> f (Array v :: GArray vec (Fin n) a)
+
+idxRange :: Small k => Proxy k -> [k]
+idxRange p = map fromIndex' $ [0..numValues p - 1]
 
 foo :: [Int]
-foo = reify (VB.fromList [1..5] :: VB.Vector Int) $ \(Proxy :: Proxy matsTag) ->
-    let bar :: Map VB.Vector matsTag (VB.Vector Int)
-        bar = tabulate (\n -> VB.replicate n n) in
-    reifyDependent bar $ \(Proxy :: Proxy f) baz ->
-        reifyIndex (UnsafeVecIdx 2 :: VecIdx matsTag) $ \idxP@(Proxy :: Proxy i) -> case baz idxP of
-            Dict -> map lookup [minBound .. (maxBound :: VecIdx (f i))]
+foo = reifyFinGArray (VB.fromList [1..5] :: VB.Vector Int) $ \(_ :: GArray VB.Vector (Fin n) Int) ->
+    let bar :: GArray VB.Vector (Fin n) (VB.Vector Int)
+        bar = Gen.tabulate (\(toIndex -> n) -> VB.replicate n n) in
+    reifyDependent bar $ \pf@(Proxy :: Proxy f) dBar ->
+        reifyIndex (unsafeFromIndex_ 2 :: Fin n) $ \idxP@(Proxy :: Proxy i) -> case reflect1 pf idxP of
+            Sub Dict -> map (\i -> lookup i (lookupD idxP dBar)) (idxRange (Proxy :: Proxy (Fin (f i))))
